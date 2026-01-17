@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { 
-  LayoutDashboard, 
-  Code, 
-  BarChart3, 
+import {
+  LayoutDashboard,
+  Code,
+  BarChart3,
   Settings,
   Zap,
-  CreditCard
+  CreditCard,
+  Shield
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -27,6 +28,11 @@ const navigation = [
     name: "Usage",
     href: "/usage",
     icon: BarChart3,
+  },
+  {
+    name: "Security",
+    href: "/security",
+    icon: Shield,
   },
   {
     name: "Billing",

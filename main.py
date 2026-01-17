@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional, Dict, List
 from app.database import init_db, get_db
-from app.models import User, Service, UsageLog, ApiKey
+from app.models import User, Service, UsageLog, ApiKey, BotDetectionLog, ServiceConfig
+from app.bot_detector import calculate_bot_score, classify_traffic, should_block
 import httpx
 import secrets
 import time
@@ -448,6 +449,7 @@ async def proxy_get(
     """
     Proxy endpoint for GET requests.
     Protected by API key authentication and rate limiting.
+    Includes bot detection and optional blocking.
     """
     # Extract API key from request header for rate limiting
     api_key_from_header = request.headers.get("X-API-Key", "")
@@ -456,6 +458,43 @@ async def proxy_get(
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
+    
+    # Bot detection
+    bot_score = calculate_bot_score(request, api_key_from_header, db)
+    classification = classify_traffic(bot_score)
+    
+    # Get service configuration for bot blocking
+    service_config = db.query(ServiceConfig).filter(
+        ServiceConfig.service_id == service_id
+    ).first()
+    
+    block_enabled = service_config.block_bots_enabled if service_config else False
+    
+    # Determine if request should be blocked
+    should_block_request, action_taken = should_block(bot_score, block_enabled)
+    
+    # Log bot detection
+    try:
+        bot_log = BotDetectionLog(
+            service_id=service_id,
+            api_key=api_key_from_header,
+            bot_score=bot_score,
+            classification=classification,
+            user_agent=request.headers.get('user-agent', ''),
+            action_taken=action_taken
+        )
+        db.add(bot_log)
+        db.commit()
+    except Exception:
+        db.rollback()
+        pass  # Don't fail request if logging fails
+    
+    # Block if necessary
+    if should_block_request:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled."
+        )
     
     # Check rate limit using the API key from header
     if not await check_rate_limit(api_key_from_header, db):
@@ -477,21 +516,36 @@ async def proxy_post(
     """
     Proxy endpoint for POST requests.
     Protected by API key authentication and rate limiting.
+    Includes bot detection and optional blocking.
     """
-    # Verify service exists
+    api_key_from_header = request.headers.get("X-API-Key", "")
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
-    # Extract API key from request header for rate limiting
-    api_key_from_header = request.headers.get("X-API-Key", "")
+    # Bot detection
+    bot_score = calculate_bot_score(request, api_key_from_header, db)
+    classification = classify_traffic(bot_score)
+    service_config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).first()
+    block_enabled = service_config.block_bots_enabled if service_config else False
+    should_block_request, action_taken = should_block(bot_score, block_enabled)
     
-    # Check rate limit using the API key from header
-    if not await check_rate_limit(api_key_from_header, db):
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded"
+    try:
+        bot_log = BotDetectionLog(
+            service_id=service_id, api_key=api_key_from_header, bot_score=bot_score,
+            classification=classification, user_agent=request.headers.get('user-agent', ''),
+            action_taken=action_taken
         )
+        db.add(bot_log)
+        db.commit()
+    except Exception:
+        db.rollback()
+    
+    if should_block_request:
+        raise HTTPException(status_code=403, detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled.")
+    
+    if not await check_rate_limit(api_key_from_header, db):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
     
     return await proxy_request(service, request, "POST", api_key_from_header, db)
 
@@ -506,21 +560,36 @@ async def proxy_put(
     """
     Proxy endpoint for PUT requests.
     Protected by API key authentication and rate limiting.
+    Includes bot detection and optional blocking.
     """
-    # Verify service exists
+    api_key_from_header = request.headers.get("X-API-Key", "")
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
-    # Extract API key from request header for rate limiting
-    api_key_from_header = request.headers.get("X-API-Key", "")
+    # Bot detection
+    bot_score = calculate_bot_score(request, api_key_from_header, db)
+    classification = classify_traffic(bot_score)
+    service_config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).first()
+    block_enabled = service_config.block_bots_enabled if service_config else False
+    should_block_request, action_taken = should_block(bot_score, block_enabled)
     
-    # Check rate limit using the API key from header
-    if not await check_rate_limit(api_key_from_header, db):
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded"
+    try:
+        bot_log = BotDetectionLog(
+            service_id=service_id, api_key=api_key_from_header, bot_score=bot_score,
+            classification=classification, user_agent=request.headers.get('user-agent', ''),
+            action_taken=action_taken
         )
+        db.add(bot_log)
+        db.commit()
+    except Exception:
+        db.rollback()
+    
+    if should_block_request:
+        raise HTTPException(status_code=403, detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled.")
+    
+    if not await check_rate_limit(api_key_from_header, db):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
     
     return await proxy_request(service, request, "PUT", api_key_from_header, db)
 
@@ -535,21 +604,36 @@ async def proxy_delete(
     """
     Proxy endpoint for DELETE requests.
     Protected by API key authentication and rate limiting.
+    Includes bot detection and optional blocking.
     """
-    # Verify service exists
+    api_key_from_header = request.headers.get("X-API-Key", "")
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
-    # Extract API key from request header for rate limiting
-    api_key_from_header = request.headers.get("X-API-Key", "")
+    # Bot detection
+    bot_score = calculate_bot_score(request, api_key_from_header, db)
+    classification = classify_traffic(bot_score)
+    service_config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).first()
+    block_enabled = service_config.block_bots_enabled if service_config else False
+    should_block_request, action_taken = should_block(bot_score, block_enabled)
     
-    # Check rate limit using the API key from header
-    if not await check_rate_limit(api_key_from_header, db):
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded"
+    try:
+        bot_log = BotDetectionLog(
+            service_id=service_id, api_key=api_key_from_header, bot_score=bot_score,
+            classification=classification, user_agent=request.headers.get('user-agent', ''),
+            action_taken=action_taken
         )
+        db.add(bot_log)
+        db.commit()
+    except Exception:
+        db.rollback()
+    
+    if should_block_request:
+        raise HTTPException(status_code=403, detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled.")
+    
+    if not await check_rate_limit(api_key_from_header, db):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
     
     return await proxy_request(service, request, "DELETE", api_key_from_header, db)
 
@@ -1055,3 +1139,195 @@ async def reset_billing(db: Session = Depends(get_db)):
         "message": "Billing cycle reset successfully. All API key costs have been cleared.",
         "reset_count": len(api_keys)
     }
+
+
+@app.get("/security/bot-activity")
+async def get_bot_activity(db: Session = Depends(get_db)):
+    """
+    Get bot activity data including metrics and recent activity logs.
+    
+    Returns:
+    - total_requests: Total requests analyzed
+    - bot_percentage: Percentage classified as bots
+    - blocked_count: Number of blocked requests
+    - recent_activity: Last 100 bot detection logs
+    """
+    # Get total requests analyzed
+    total_requests = db.query(func.count(BotDetectionLog.id)).scalar() or 0
+    
+    # Get bot count (classification = 'bot')
+    bot_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == 'bot'
+    ).scalar() or 0
+    
+    # Calculate bot percentage
+    bot_percentage = (bot_count / total_requests * 100) if total_requests > 0 else 0.0
+    
+    # Get blocked count
+    blocked_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.action_taken == 'blocked'
+    ).scalar() or 0
+    
+    # Get suspicious count
+    suspicious_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == 'suspicious'
+    ).scalar() or 0
+    
+    # Get recent activity (last 100 logs)
+    recent_logs = db.query(BotDetectionLog).order_by(
+        BotDetectionLog.timestamp.desc()
+    ).limit(100).all()
+    
+    # Get service names for the logs
+    recent_activity = []
+    for log in recent_logs:
+        service = db.query(Service).filter(Service.id == log.service_id).first()
+        service_name = service.name if service else "Unknown"
+        
+        recent_activity.append({
+            "id": log.id,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+            "service_id": log.service_id,
+            "service_name": service_name,
+            "api_key": f"{log.api_key[:8]}••••{log.api_key[-4:]}" if len(log.api_key) > 12 else "••••••••",
+            "bot_score": round(log.bot_score, 3),
+            "classification": log.classification,
+            "user_agent": log.user_agent or "",
+            "action_taken": log.action_taken
+        })
+    
+    return {
+        "total_requests": total_requests,
+        "bot_percentage": round(bot_percentage, 2),
+        "blocked_count": blocked_count,
+        "suspicious_count": suspicious_count,
+        "recent_activity": recent_activity
+    }
+
+
+@app.get("/security/bot-stats")
+async def get_bot_stats(db: Session = Depends(get_db)):
+    """
+    Get aggregated bot statistics.
+    
+    Returns:
+    - classification_breakdown: Counts by classification type
+    - top_bot_user_agents: Most common bot user agents
+    """
+    # Classification breakdown
+    human_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == 'human'
+    ).scalar() or 0
+    
+    suspicious_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == 'suspicious'
+    ).scalar() or 0
+    
+    bot_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == 'bot'
+    ).scalar() or 0
+    
+    # Top bot user agents (only from bot-classified requests)
+    top_user_agents_query = db.query(
+        BotDetectionLog.user_agent,
+        func.count(BotDetectionLog.id).label('count')
+    ).filter(
+        BotDetectionLog.classification == 'bot',
+        BotDetectionLog.user_agent != None,
+        BotDetectionLog.user_agent != ''
+    ).group_by(
+        BotDetectionLog.user_agent
+    ).order_by(
+        func.count(BotDetectionLog.id).desc()
+    ).limit(10).all()
+    
+    top_bot_user_agents = [
+        {"user_agent": ua, "count": count}
+        for ua, count in top_user_agents_query
+    ]
+    
+    return {
+        "classification_breakdown": {
+            "human": human_count,
+            "suspicious": suspicious_count,
+            "bot": bot_count
+        },
+        "top_bot_user_agents": top_bot_user_agents
+    }
+
+
+@app.put("/services/{service_id}/bot-blocking")
+async def update_bot_blocking(
+    service_id: int,
+    request: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Update bot blocking configuration for a service.
+    
+    Request body: {"enabled": true/false}
+    """
+    # Verify service exists
+    service = db.query(Service).filter(Service.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    # Get enabled flag from request
+    enabled = request.get("enabled")
+    if enabled is None:
+        raise HTTPException(status_code=400, detail="'enabled' field is required")
+    
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
+    
+    # Get or create service config
+    service_config = db.query(ServiceConfig).filter(
+        ServiceConfig.service_id == service_id
+    ).first()
+    
+    if not service_config:
+        # Create new config
+        service_config = ServiceConfig(
+            service_id=service_id,
+            block_bots_enabled=enabled
+        )
+        db.add(service_config)
+    else:
+        # Update existing config
+        service_config.block_bots_enabled = enabled
+    
+    db.commit()
+    db.refresh(service_config)
+    
+    return {
+        "message": f"Bot blocking {'enabled' if enabled else 'disabled'} for service {service_id}",
+        "service_id": service_id,
+        "block_bots_enabled": service_config.block_bots_enabled
+    }
+
+
+@app.get("/services/bot-blocking")
+async def get_all_bot_blocking_configs(db: Session = Depends(get_db)):
+    """
+    Get bot blocking configuration for all services.
+    
+    Returns list of services with their bot blocking status.
+    """
+    # Get all services
+    services = db.query(Service).all()
+    
+    result = []
+    for service in services:
+        # Get config for this service
+        config = db.query(ServiceConfig).filter(
+            ServiceConfig.service_id == service.id
+        ).first()
+        
+        result.append({
+            "service_id": service.id,
+            "service_name": service.name,
+            "block_bots_enabled": config.block_bots_enabled if config else False
+        })
+    
+    return {"services": result}
+

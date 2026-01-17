@@ -344,4 +344,71 @@ export const api = {
       }),
     });
   },
+
+  /**
+   * Get bot activity data
+   */
+  getBotActivity: async () => {
+    return apiRequest<{
+      total_requests: number;
+      bot_percentage: number;
+      blocked_count: number;
+      suspicious_count: number;
+      recent_activity: Array<{
+        id: number;
+        timestamp: string | null;
+        service_id: number;
+        service_name: string;
+        api_key: string;
+        bot_score: number;
+        classification: string;
+        user_agent: string;
+        action_taken: string;
+      }>;
+    }>("/security/bot-activity");
+  },
+
+  /**
+   * Get bot statistics
+   */
+  getBotStats: async () => {
+    return apiRequest<{
+      classification_breakdown: {
+        human: number;
+        suspicious: number;
+        bot: number;
+      };
+      top_bot_user_agents: Array<{
+        user_agent: string;
+        count: number;
+      }>;
+    }>("/security/bot-stats");
+  },
+
+  /**
+   * Update bot blocking configuration for a service
+   */
+  updateBotBlocking: async (serviceId: number, enabled: boolean) => {
+    return apiRequest<{
+      message: string;
+      service_id: number;
+      block_bots_enabled: boolean;
+    }>(`/services/${serviceId}/bot-blocking`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
+  /**
+   * Get all bot blocking configurations
+   */
+  getAllBotBlockingConfigs: async () => {
+    return apiRequest<{
+      services: Array<{
+        service_id: number;
+        service_name: string;
+        block_bots_enabled: boolean;
+      }>;
+    }>("/services/bot-blocking");
+  },
 };

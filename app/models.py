@@ -91,3 +91,32 @@ class UsageLog(Base):
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False, index=True)
     api_key = Column(String, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class BotDetectionLog(Base):
+    """
+    BotDetectionLog model for tracking bot detection results.
+    """
+    __tablename__ = "bot_detection_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=False, index=True)
+    api_key = Column(String, nullable=False, index=True)
+    bot_score = Column(Float, nullable=False)  # 0.0 to 1.0
+    classification = Column(String, nullable=False)  # human, suspicious, bot
+    user_agent = Column(String, nullable=True)
+    action_taken = Column(String, nullable=False)  # allowed, flagged, blocked
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ServiceConfig(Base):
+    """
+    ServiceConfig model for service-level configuration.
+    """
+    __tablename__ = "service_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=False, unique=True, index=True)
+    block_bots_enabled = Column(Boolean, default=False, nullable=False)
+    bot_threshold = Column(Float, default=0.7, nullable=False)  # Score threshold for blocking
+

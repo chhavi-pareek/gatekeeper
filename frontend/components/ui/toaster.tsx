@@ -63,12 +63,12 @@ export function Toaster() {
   if (currentToasts.length === 0) return null;
 
   return (
-    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+    <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 w-full max-w-sm">
       {currentToasts.map((toast) => (
         <Alert
           key={toast.id}
           className={cn(
-            "shadow-lg animate-in slide-in-from-right",
+            "mb-2 shadow-lg animate-in slide-in-from-right",
             toast.type === "success" && "border-green-500/50 bg-green-500/10",
             toast.type === "error" && "border-red-500/50 bg-red-500/10",
             toast.type === "info" && "border-blue-500/50 bg-blue-500/10",
@@ -93,7 +93,8 @@ export function Toaster() {
             </AlertDescription>
             <button
               onClick={() => removeToast(toast.id)}
-              className="text-muted-foreground hover:text-foreground shrink-0"
+              className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+              type="button"
             >
               <X className="h-4 w-4" />
             </button>
