@@ -420,8 +420,7 @@ async def proxy_request(
     request: Request,
     method: str,
     api_key: str,
-    db: Session,
-    path_suffix: str = ""
+    db: Session
 ) -> Response:
     """
     Proxy an HTTP request to the service's target_url.
@@ -429,10 +428,6 @@ async def proxy_request(
     Forwards query parameters, request body, HTTP method, and safe headers.
     Returns status code, response body, and response headers.
     Handles timeouts gracefully.
-    Injects watermarks if enabled for the service.
-    
-    Args:
-        path_suffix: Optional path to append to the target URL
     """
     # Validate and normalize the target URL
     target_url = service.target_url.strip()
@@ -448,13 +443,6 @@ async def proxy_request(
             status_code=500,
             detail=f"Invalid target_url format: {target_url}. URL must start with http:// or https://"
         )
-    
-    # Append path suffix if provided
-    if path_suffix:
-        # Remove trailing slash from target_url and leading slash from path_suffix
-        target_url = target_url.rstrip('/')
-        path_suffix = path_suffix.lstrip('/')
-        target_url = f"{target_url}/{path_suffix}"
     
     # Get safe headers (exclude host, content-length, and X-API-Key)
     excluded_headers = {'host', 'content-length', 'x-api-key', 'connection', 'transfer-encoding'}
@@ -492,18 +480,11 @@ async def proxy_request(
             )
             
             # Build response headers (exclude some that shouldn't be forwarded)
-            # Note: httpx automatically decodes gzip/deflate, so we must not forward content-encoding
             response_headers = {
                 key: value
                 for key, value in response.headers.items()
-                if key.lower() not in {'content-length', 'connection', 'transfer-encoding', 'content-encoding'}
+                if key.lower() not in {'content-length', 'connection', 'transfer-encoding'}
             }
-            
-            # Get API key object for watermarking
-            api_key_obj = db.query(ApiKey).filter(
-                ApiKey.key == api_key,
-                ApiKey.is_active == True
-            ).first()
             
             # Log successful requests (HTTP 2xx) to UsageLog and update billing
             if 200 <= response.status_code < 300:
@@ -517,6 +498,11 @@ async def proxy_request(
                     db.add(usage_log)
                     
                     # Update billing: increment ApiKey.total_cost by ApiKey.price_per_request
+                    api_key_obj = db.query(ApiKey).filter(
+                        ApiKey.key == api_key,
+                        ApiKey.is_active == True
+                    ).first()
+                    
                     if api_key_obj:
                         api_key_obj.total_cost += api_key_obj.price_per_request
                     
@@ -526,49 +512,9 @@ async def proxy_request(
                     db.rollback()
                     pass
             
-            # Prepare response content (potentially with watermark)
-            response_content = response.content
-            content_type = response.headers.get('content-type', '')
-            
-            # Inject watermark if enabled for service
-            if getattr(service, 'watermarking_enabled', False) and api_key_obj:
-                try:
-                    # Generate unique request ID and timestamp
-                    request_id = str(uuid.uuid4())[:8]
-                    timestamp = datetime.now(timezone.utc).isoformat()
-                    
-                    # Generate watermark
-                    watermark = generate_watermark(
-                        service_id=service.id,
-                        api_key_id=api_key_obj.id,
-                        request_id=request_id,
-                        timestamp=timestamp
-                    )
-                    
-                    # Inject based on content type
-                    if 'application/json' in content_type:
-                        try:
-                            json_data = json.loads(response_content.decode('utf-8'))
-                            watermarked_data = inject_watermark_json(json_data, watermark)
-                            response_content = json.dumps(watermarked_data).encode('utf-8')
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            # If JSON parsing fails, treat as text
-                            text_content = response_content.decode('utf-8', errors='replace')
-                            watermarked_text = inject_watermark_text(text_content, watermark, content_type)
-                            response_content = watermarked_text.encode('utf-8')
-                    elif 'text/' in content_type or 'html' in content_type:
-                        text_content = response_content.decode('utf-8', errors='replace')
-                        watermarked_text = inject_watermark_text(text_content, watermark, content_type)
-                        response_content = watermarked_text.encode('utf-8')
-                    # For binary content types (images, etc.), don't add watermark
-                except Exception as e:
-                    # Don't fail the request if watermarking fails
-                    logger.warning(f"Watermarking failed: {e}")
-                    pass
-            
             # Return response with status code, body, and headers
             return Response(
-                content=response_content,
+                content=response.content,
                 status_code=response.status_code,
                 headers=response_headers,
                 media_type=response.headers.get('content-type')
@@ -591,18 +537,15 @@ async def proxy_request(
 
 
 @app.get("/proxy/{service_id}")
-@app.get("/proxy/{service_id}/{path:path}")
 async def proxy_get(
     service_id: int,
     request: Request,
-    path: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Proxy endpoint for GET requests.
     Protected by API key authentication and rate limiting.
-    Supports optional path suffix: /proxy/{service_id}/{path}
     """
     # Extract API key from request header for rate limiting
     api_key_from_header = request.headers.get("X-API-Key", "")
@@ -619,22 +562,19 @@ async def proxy_get(
             detail="Rate limit exceeded"
         )
     
-    return await proxy_request(service, request, "GET", api_key_from_header, db, path)
+    return await proxy_request(service, request, "GET", api_key_from_header, db)
 
 
 @app.post("/proxy/{service_id}")
-@app.post("/proxy/{service_id}/{path:path}")
 async def proxy_post(
     service_id: int,
     request: Request,
-    path: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Proxy endpoint for POST requests.
     Protected by API key authentication and rate limiting.
-    Supports optional path suffix: /proxy/{service_id}/{path}
     """
     # Verify service exists
     service = db.query(Service).filter(Service.id == service_id).first()
@@ -651,22 +591,19 @@ async def proxy_post(
             detail="Rate limit exceeded"
         )
     
-    return await proxy_request(service, request, "POST", api_key_from_header, db, path)
+    return await proxy_request(service, request, "POST", api_key_from_header, db)
 
 
 @app.put("/proxy/{service_id}")
-@app.put("/proxy/{service_id}/{path:path}")
 async def proxy_put(
     service_id: int,
     request: Request,
-    path: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Proxy endpoint for PUT requests.
     Protected by API key authentication and rate limiting.
-    Supports optional path suffix: /proxy/{service_id}/{path}
     """
     # Verify service exists
     service = db.query(Service).filter(Service.id == service_id).first()
@@ -683,22 +620,19 @@ async def proxy_put(
             detail="Rate limit exceeded"
         )
     
-    return await proxy_request(service, request, "PUT", api_key_from_header, db, path)
+    return await proxy_request(service, request, "PUT", api_key_from_header, db)
 
 
 @app.delete("/proxy/{service_id}")
-@app.delete("/proxy/{service_id}/{path:path}")
 async def proxy_delete(
     service_id: int,
     request: Request,
-    path: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Proxy endpoint for DELETE requests.
     Protected by API key authentication and rate limiting.
-    Supports optional path suffix: /proxy/{service_id}/{path}
     """
     # Verify service exists
     service = db.query(Service).filter(Service.id == service_id).first()
@@ -715,7 +649,7 @@ async def proxy_delete(
             detail="Rate limit exceeded"
         )
     
-    return await proxy_request(service, request, "DELETE", api_key_from_header, db, path)
+    return await proxy_request(service, request, "DELETE", api_key_from_header, db)
 
 
 @app.get("/me/api-key")
@@ -1219,170 +1153,3 @@ async def reset_billing(db: Session = Depends(get_db)):
         "message": "Billing cycle reset successfully. All API key costs have been cleared.",
         "reset_count": len(api_keys)
     }
-
-
-# ============================================================================
-# Watermarking Endpoints
-# ============================================================================
-
-class WatermarkingToggleRequest(BaseModel):
-    """Request model for toggling watermarking."""
-    enabled: bool
-
-
-class WatermarkVerifyRequest(BaseModel):
-    """Request model for verifying watermarked data."""
-    data: str  # The leaked data (JSON string or text)
-
-
-@app.post("/services/{service_id}/watermarking")
-async def toggle_watermarking(
-    service_id: int,
-    request: WatermarkingToggleRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Enable or disable watermarking for a service.
-    
-    When enabled, all API responses will be watermarked with:
-    - service_id
-    - api_key_id
-    - request_id
-    - timestamp
-    
-    Control-plane endpoint - no authentication required.
-    """
-    # Get the service
-    service = db.query(Service).filter(Service.id == service_id).first()
-    
-    if not service:
-        raise HTTPException(status_code=404, detail="Service not found")
-    
-    # Update watermarking status
-    service.watermarking_enabled = request.enabled
-    db.commit()
-    db.refresh(service)
-    
-    status = "enabled" if request.enabled else "disabled"
-    return {
-        "message": f"Watermarking {status} for service {service.name}",
-        "service_id": service_id,
-        "service_name": service.name,
-        "watermarking_enabled": service.watermarking_enabled
-    }
-
-
-@app.get("/services/{service_id}/watermarking")
-async def get_watermarking_status(
-    service_id: int,
-    db: Session = Depends(get_db)
-):
-    """
-    Get current watermarking status for a service.
-    
-    Control-plane endpoint - no authentication required.
-    """
-    # Get the service
-    service = db.query(Service).filter(Service.id == service_id).first()
-    
-    if not service:
-        raise HTTPException(status_code=404, detail="Service not found")
-    
-    return {
-        "service_id": service_id,
-        "service_name": service.name,
-        "watermarking_enabled": getattr(service, 'watermarking_enabled', False)
-    }
-
-
-@app.post("/watermark/verify")
-async def verify_watermark(
-    request: WatermarkVerifyRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Verify and extract watermark from leaked data.
-    
-    Accepts JSON string or text content and attempts to extract the watermark.
-    Returns the decoded watermark metadata including:
-    - service_id and service_name
-    - api_key_id and masked key
-    - request_id
-    - timestamp
-    
-    Control-plane endpoint - no authentication required.
-    """
-    data = request.data.strip()
-    watermark = None
-    
-    # Try to extract watermark from JSON
-    try:
-        json_data = json.loads(data)
-        watermark = extract_watermark_from_json(json_data)
-    except json.JSONDecodeError:
-        pass
-    
-    # If not found in JSON, try text extraction
-    if not watermark:
-        watermark = extract_watermark_from_text(data)
-    
-    if not watermark:
-        raise HTTPException(
-            status_code=404,
-            detail="No watermark found in the provided data. The data may not be watermarked or the watermark may have been removed."
-        )
-    
-    # Decode the watermark
-    decoded = decode_watermark(watermark)
-    
-    if not decoded:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid watermark format. The watermark appears to be corrupted or tampered with."
-        )
-    
-    # Enrich with additional context from database
-    service = db.query(Service).filter(Service.id == decoded["service_id"]).first()
-    api_key_obj = db.query(ApiKey).filter(ApiKey.id == decoded["api_key_id"]).first()
-    
-    service_name = service.name if service else "Unknown (deleted)"
-    
-    # Mask the API key for security
-    key_masked = "Unknown (deleted)"
-    if api_key_obj:
-        key_masked = api_key_obj.key[:8] + "..." + api_key_obj.key[-4:] if len(api_key_obj.key) > 12 else "***"
-    
-    return {
-        "watermark_found": True,
-        "raw_watermark": watermark,
-        "decoded": {
-            "service_id": decoded["service_id"],
-            "service_name": service_name,
-            "api_key_id": decoded["api_key_id"],
-            "api_key_masked": key_masked,
-            "request_id": decoded["request_id"],
-            "timestamp": decoded["timestamp"]
-        },
-        "attribution": f"This data was accessed via API key ID {decoded['api_key_id']} on service '{service_name}' at {decoded['timestamp']}"
-    }
-
-
-@app.get("/services/list")
-async def list_services(db: Session = Depends(get_db)):
-    """
-    List all registered services with their watermarking status.
-    
-    Control-plane endpoint - no authentication required.
-    """
-    services = db.query(Service).all()
-    
-    result = []
-    for service in services:
-        result.append({
-            "id": service.id,
-            "name": service.name,
-            "target_url": service.target_url,
-            "watermarking_enabled": getattr(service, 'watermarking_enabled', False)
-        })
-    
-    return {"services": result}

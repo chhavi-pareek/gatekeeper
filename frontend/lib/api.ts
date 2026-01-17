@@ -344,4 +344,70 @@ export const api = {
       }),
     });
   },
+
+  // ============================================================================
+  // Watermarking / Data Protection
+  // ============================================================================
+
+  /**
+   * Get list of all services with watermarking status
+   */
+  listServices: async () => {
+    return apiRequest<{
+      services: Array<{
+        id: number;
+        name: string;
+        target_url: string;
+        watermarking_enabled: boolean;
+      }>;
+    }>("/services/list");
+  },
+
+  /**
+   * Get watermarking status for a specific service
+   */
+  getWatermarkingStatus: async (serviceId: number) => {
+    return apiRequest<{
+      service_id: number;
+      service_name: string;
+      watermarking_enabled: boolean;
+    }>(`/services/${serviceId}/watermarking`);
+  },
+
+  /**
+   * Toggle watermarking for a service
+   */
+  toggleWatermarking: async (serviceId: number, enabled: boolean) => {
+    return apiRequest<{
+      message: string;
+      service_id: number;
+      service_name: string;
+      watermarking_enabled: boolean;
+    }>(`/services/${serviceId}/watermarking`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
+  /**
+   * Verify leaked data and extract watermark
+   */
+  verifyWatermark: async (data: string) => {
+    return apiRequest<{
+      watermark_found: boolean;
+      raw_watermark: string;
+      decoded: {
+        service_id: number;
+        service_name: string;
+        api_key_id: number;
+        api_key_masked: string;
+        request_id: string;
+        timestamp: string;
+      };
+      attribution: string;
+    }>("/watermark/verify", {
+      method: "POST",
+      body: JSON.stringify({ data }),
+    });
+  },
 };

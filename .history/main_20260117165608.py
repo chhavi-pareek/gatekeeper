@@ -420,8 +420,7 @@ async def proxy_request(
     request: Request,
     method: str,
     api_key: str,
-    db: Session,
-    path_suffix: str = ""
+    db: Session
 ) -> Response:
     """
     Proxy an HTTP request to the service's target_url.
@@ -430,9 +429,6 @@ async def proxy_request(
     Returns status code, response body, and response headers.
     Handles timeouts gracefully.
     Injects watermarks if enabled for the service.
-    
-    Args:
-        path_suffix: Optional path to append to the target URL
     """
     # Validate and normalize the target URL
     target_url = service.target_url.strip()
@@ -448,13 +444,6 @@ async def proxy_request(
             status_code=500,
             detail=f"Invalid target_url format: {target_url}. URL must start with http:// or https://"
         )
-    
-    # Append path suffix if provided
-    if path_suffix:
-        # Remove trailing slash from target_url and leading slash from path_suffix
-        target_url = target_url.rstrip('/')
-        path_suffix = path_suffix.lstrip('/')
-        target_url = f"{target_url}/{path_suffix}"
     
     # Get safe headers (exclude host, content-length, and X-API-Key)
     excluded_headers = {'host', 'content-length', 'x-api-key', 'connection', 'transfer-encoding'}
@@ -492,11 +481,10 @@ async def proxy_request(
             )
             
             # Build response headers (exclude some that shouldn't be forwarded)
-            # Note: httpx automatically decodes gzip/deflate, so we must not forward content-encoding
             response_headers = {
                 key: value
                 for key, value in response.headers.items()
-                if key.lower() not in {'content-length', 'connection', 'transfer-encoding', 'content-encoding'}
+                if key.lower() not in {'content-length', 'connection', 'transfer-encoding'}
             }
             
             # Get API key object for watermarking

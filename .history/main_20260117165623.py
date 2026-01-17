@@ -492,11 +492,10 @@ async def proxy_request(
             )
             
             # Build response headers (exclude some that shouldn't be forwarded)
-            # Note: httpx automatically decodes gzip/deflate, so we must not forward content-encoding
             response_headers = {
                 key: value
                 for key, value in response.headers.items()
-                if key.lower() not in {'content-length', 'connection', 'transfer-encoding', 'content-encoding'}
+                if key.lower() not in {'content-length', 'connection', 'transfer-encoding'}
             }
             
             # Get API key object for watermarking
