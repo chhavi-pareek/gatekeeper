@@ -91,3 +91,36 @@ class UsageLog(Base):
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False, index=True)
     api_key = Column(String, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class RequestHash(Base):
+    """
+    RequestHash model for cryptographic transparency.
+    Stores SHA-256 hash of each API request for auditability.
+    """
+    __tablename__ = "request_hashes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=False, index=True)
+    api_key_id = Column(Integer, ForeignKey("api_keys.id"), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    request_path = Column(String, nullable=False)
+    response_status = Column(Integer, nullable=False)
+    hash = Column(String(64), nullable=False, index=True)  # SHA-256 hash (64 hex chars)
+    merkle_batch_id = Column(Integer, ForeignKey("merkle_roots.id"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MerkleRoot(Base):
+    """
+    MerkleRoot model for storing computed Merkle roots.
+    Each root represents a batch of request hashes for cryptographic verification.
+    """
+    __tablename__ = "merkle_roots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    merkle_root = Column(String(64), nullable=False, index=True)  # SHA-256 hash (64 hex chars)
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=False)
+    request_count = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
