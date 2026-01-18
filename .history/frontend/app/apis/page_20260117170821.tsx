@@ -129,28 +129,6 @@ export default function APIsPage() {
               </CardHeader>
               <CardContent>
                 <form onSubmit={handleSubmit} className="space-y-6">
-                  {/* Quick Select Presets */}
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium">Quick Select</Label>
-                    <div className="flex flex-wrap gap-2">
-                      {presetApis.map((preset) => (
-                        <Button
-                          key={preset.url}
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => selectPreset(preset)}
-                          className="text-xs"
-                        >
-                          {preset.name}
-                        </Button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Click a preset to auto-fill, or enter custom details below
-                    </p>
-                  </div>
-
                   <div className="space-y-2">
                     <Label htmlFor="name" className="text-sm font-medium">
                       API Name

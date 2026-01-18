@@ -9,8 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional, Dict, List
 from app.database import init_db, get_db
-from app.models import User, Service, UsageLog, ApiKey, BotDetectionLog, ServiceConfig
-from app.bot_detector import calculate_bot_score, classify_traffic, should_block
+from app.models import User, Service, UsageLog, ApiKey
 import httpx
 import secrets
 import time
@@ -421,8 +420,7 @@ async def proxy_request(
     request: Request,
     method: str,
     api_key: str,
-    db: Session,
-    path_suffix: str = ""
+    db: Session
 ) -> Response:
     """
     Proxy an HTTP request to the service's target_url.
@@ -431,9 +429,6 @@ async def proxy_request(
     Returns status code, response body, and response headers.
     Handles timeouts gracefully.
     Injects watermarks if enabled for the service.
-    
-    Args:
-        path_suffix: Optional path to append to the target URL
     """
     # Validate and normalize the target URL
     target_url = service.target_url.strip()
@@ -449,13 +444,6 @@ async def proxy_request(
             status_code=500,
             detail=f"Invalid target_url format: {target_url}. URL must start with http:// or https://"
         )
-    
-    # Append path suffix if provided
-    if path_suffix:
-        # Remove trailing slash from target_url and leading slash from path_suffix
-        target_url = target_url.rstrip('/')
-        path_suffix = path_suffix.lstrip('/')
-        target_url = f"{target_url}/{path_suffix}"
     
     # Get safe headers (exclude host, content-length, and X-API-Key)
     excluded_headers = {'host', 'content-length', 'x-api-key', 'connection', 'transfer-encoding'}
@@ -493,11 +481,10 @@ async def proxy_request(
             )
             
             # Build response headers (exclude some that shouldn't be forwarded)
-            # Note: httpx automatically decodes gzip/deflate, so we must not forward content-encoding
             response_headers = {
                 key: value
                 for key, value in response.headers.items()
-                if key.lower() not in {'content-length', 'connection', 'transfer-encoding', 'content-encoding'}
+                if key.lower() not in {'content-length', 'connection', 'transfer-encoding'}
             }
             
             # Get API key object for watermarking
@@ -603,6 +590,7 @@ async def proxy_get(
     """
     Proxy endpoint for GET requests.
     Protected by API key authentication and rate limiting.
+    Supports optional path suffix: /proxy/{service_id}/{path}
     """
     # Extract API key from request header for rate limiting
     api_key_from_header = request.headers.get("X-API-Key", "")
@@ -611,43 +599,6 @@ async def proxy_get(
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
-    
-    # Bot detection
-    bot_score = calculate_bot_score(request, api_key_from_header, db)
-    classification = classify_traffic(bot_score)
-    
-    # Get service configuration for bot blocking
-    service_config = db.query(ServiceConfig).filter(
-        ServiceConfig.service_id == service_id
-    ).first()
-    
-    block_enabled = service_config.block_bots_enabled if service_config else False
-    
-    # Determine if request should be blocked
-    should_block_request, action_taken = should_block(bot_score, block_enabled)
-    
-    # Log bot detection
-    try:
-        bot_log = BotDetectionLog(
-            service_id=service_id,
-            api_key=api_key_from_header,
-            bot_score=bot_score,
-            classification=classification,
-            user_agent=request.headers.get('user-agent', ''),
-            action_taken=action_taken
-        )
-        db.add(bot_log)
-        db.commit()
-    except Exception:
-        db.rollback()
-        pass  # Don't fail request if logging fails
-    
-    # Block if necessary
-    if should_block_request:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled."
-        )
     
     # Check rate limit using the API key from header
     if not await check_rate_limit(api_key_from_header, db):
@@ -671,45 +622,30 @@ async def proxy_post(
     """
     Proxy endpoint for POST requests.
     Protected by API key authentication and rate limiting.
+    Supports optional path suffix: /proxy/{service_id}/{path}
     """
-    api_key_from_header = request.headers.get("X-API-Key", "")
+    # Verify service exists
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
-    # Bot detection
-    bot_score = calculate_bot_score(request, api_key_from_header, db)
-    classification = classify_traffic(bot_score)
-    service_config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).first()
-    block_enabled = service_config.block_bots_enabled if service_config else False
-    should_block_request, action_taken = should_block(bot_score, block_enabled)
+    # Extract API key from request header for rate limiting
+    api_key_from_header = request.headers.get("X-API-Key", "")
     
-    try:
-        bot_log = BotDetectionLog(
-            service_id=service_id, api_key=api_key_from_header, bot_score=bot_score,
-            classification=classification, user_agent=request.headers.get('user-agent', ''),
-            action_taken=action_taken
-        )
-        db.add(bot_log)
-        db.commit()
-    except Exception:
-        db.rollback()
-    
-    if should_block_request:
-        raise HTTPException(status_code=403, detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled.")
-    
+    # Check rate limit using the API key from header
     if not await check_rate_limit(api_key_from_header, db):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded"
+        )
     
     return await proxy_request(service, request, "POST", api_key_from_header, db, path)
 
 
 @app.put("/proxy/{service_id}")
-@app.put("/proxy/{service_id}/{path:path}")
 async def proxy_put(
     service_id: int,
     request: Request,
-    path: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -717,44 +653,28 @@ async def proxy_put(
     Proxy endpoint for PUT requests.
     Protected by API key authentication and rate limiting.
     """
-    api_key_from_header = request.headers.get("X-API-Key", "")
+    # Verify service exists
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
-    # Bot detection
-    bot_score = calculate_bot_score(request, api_key_from_header, db)
-    classification = classify_traffic(bot_score)
-    service_config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).first()
-    block_enabled = service_config.block_bots_enabled if service_config else False
-    should_block_request, action_taken = should_block(bot_score, block_enabled)
+    # Extract API key from request header for rate limiting
+    api_key_from_header = request.headers.get("X-API-Key", "")
     
-    try:
-        bot_log = BotDetectionLog(
-            service_id=service_id, api_key=api_key_from_header, bot_score=bot_score,
-            classification=classification, user_agent=request.headers.get('user-agent', ''),
-            action_taken=action_taken
-        )
-        db.add(bot_log)
-        db.commit()
-    except Exception:
-        db.rollback()
-    
-    if should_block_request:
-        raise HTTPException(status_code=403, detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled.")
-    
+    # Check rate limit using the API key from header
     if not await check_rate_limit(api_key_from_header, db):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded"
+        )
     
-    return await proxy_request(service, request, "PUT", api_key_from_header, db, path)
+    return await proxy_request(service, request, "PUT", api_key_from_header, db)
 
 
 @app.delete("/proxy/{service_id}")
-@app.delete("/proxy/{service_id}/{path:path}")
 async def proxy_delete(
     service_id: int,
     request: Request,
-    path: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -762,36 +682,22 @@ async def proxy_delete(
     Proxy endpoint for DELETE requests.
     Protected by API key authentication and rate limiting.
     """
-    api_key_from_header = request.headers.get("X-API-Key", "")
+    # Verify service exists
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
-    # Bot detection
-    bot_score = calculate_bot_score(request, api_key_from_header, db)
-    classification = classify_traffic(bot_score)
-    service_config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).first()
-    block_enabled = service_config.block_bots_enabled if service_config else False
-    should_block_request, action_taken = should_block(bot_score, block_enabled)
+    # Extract API key from request header for rate limiting
+    api_key_from_header = request.headers.get("X-API-Key", "")
     
-    try:
-        bot_log = BotDetectionLog(
-            service_id=service_id, api_key=api_key_from_header, bot_score=bot_score,
-            classification=classification, user_agent=request.headers.get('user-agent', ''),
-            action_taken=action_taken
-        )
-        db.add(bot_log)
-        db.commit()
-    except Exception:
-        db.rollback()
-    
-    if should_block_request:
-        raise HTTPException(status_code=403, detail=f"Bot traffic detected (score: {bot_score:.2f}). This service has bot blocking enabled.")
-    
+    # Check rate limit using the API key from header
     if not await check_rate_limit(api_key_from_header, db):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded"
+        )
     
-    return await proxy_request(service, request, "DELETE", api_key_from_header, db, path)
+    return await proxy_request(service, request, "DELETE", api_key_from_header, db)
 
 
 @app.get("/me/api-key")
@@ -1295,3 +1201,170 @@ async def reset_billing(db: Session = Depends(get_db)):
         "message": "Billing cycle reset successfully. All API key costs have been cleared.",
         "reset_count": len(api_keys)
     }
+
+
+# ============================================================================
+# Watermarking Endpoints
+# ============================================================================
+
+class WatermarkingToggleRequest(BaseModel):
+    """Request model for toggling watermarking."""
+    enabled: bool
+
+
+class WatermarkVerifyRequest(BaseModel):
+    """Request model for verifying watermarked data."""
+    data: str  # The leaked data (JSON string or text)
+
+
+@app.post("/services/{service_id}/watermarking")
+async def toggle_watermarking(
+    service_id: int,
+    request: WatermarkingToggleRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Enable or disable watermarking for a service.
+    
+    When enabled, all API responses will be watermarked with:
+    - service_id
+    - api_key_id
+    - request_id
+    - timestamp
+    
+    Control-plane endpoint - no authentication required.
+    """
+    # Get the service
+    service = db.query(Service).filter(Service.id == service_id).first()
+    
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    # Update watermarking status
+    service.watermarking_enabled = request.enabled
+    db.commit()
+    db.refresh(service)
+    
+    status = "enabled" if request.enabled else "disabled"
+    return {
+        "message": f"Watermarking {status} for service {service.name}",
+        "service_id": service_id,
+        "service_name": service.name,
+        "watermarking_enabled": service.watermarking_enabled
+    }
+
+
+@app.get("/services/{service_id}/watermarking")
+async def get_watermarking_status(
+    service_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get current watermarking status for a service.
+    
+    Control-plane endpoint - no authentication required.
+    """
+    # Get the service
+    service = db.query(Service).filter(Service.id == service_id).first()
+    
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    return {
+        "service_id": service_id,
+        "service_name": service.name,
+        "watermarking_enabled": getattr(service, 'watermarking_enabled', False)
+    }
+
+
+@app.post("/watermark/verify")
+async def verify_watermark(
+    request: WatermarkVerifyRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Verify and extract watermark from leaked data.
+    
+    Accepts JSON string or text content and attempts to extract the watermark.
+    Returns the decoded watermark metadata including:
+    - service_id and service_name
+    - api_key_id and masked key
+    - request_id
+    - timestamp
+    
+    Control-plane endpoint - no authentication required.
+    """
+    data = request.data.strip()
+    watermark = None
+    
+    # Try to extract watermark from JSON
+    try:
+        json_data = json.loads(data)
+        watermark = extract_watermark_from_json(json_data)
+    except json.JSONDecodeError:
+        pass
+    
+    # If not found in JSON, try text extraction
+    if not watermark:
+        watermark = extract_watermark_from_text(data)
+    
+    if not watermark:
+        raise HTTPException(
+            status_code=404,
+            detail="No watermark found in the provided data. The data may not be watermarked or the watermark may have been removed."
+        )
+    
+    # Decode the watermark
+    decoded = decode_watermark(watermark)
+    
+    if not decoded:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid watermark format. The watermark appears to be corrupted or tampered with."
+        )
+    
+    # Enrich with additional context from database
+    service = db.query(Service).filter(Service.id == decoded["service_id"]).first()
+    api_key_obj = db.query(ApiKey).filter(ApiKey.id == decoded["api_key_id"]).first()
+    
+    service_name = service.name if service else "Unknown (deleted)"
+    
+    # Mask the API key for security
+    key_masked = "Unknown (deleted)"
+    if api_key_obj:
+        key_masked = api_key_obj.key[:8] + "..." + api_key_obj.key[-4:] if len(api_key_obj.key) > 12 else "***"
+    
+    return {
+        "watermark_found": True,
+        "raw_watermark": watermark,
+        "decoded": {
+            "service_id": decoded["service_id"],
+            "service_name": service_name,
+            "api_key_id": decoded["api_key_id"],
+            "api_key_masked": key_masked,
+            "request_id": decoded["request_id"],
+            "timestamp": decoded["timestamp"]
+        },
+        "attribution": f"This data was accessed via API key ID {decoded['api_key_id']} on service '{service_name}' at {decoded['timestamp']}"
+    }
+
+
+@app.get("/services/list")
+async def list_services(db: Session = Depends(get_db)):
+    """
+    List all registered services with their watermarking status.
+    
+    Control-plane endpoint - no authentication required.
+    """
+    services = db.query(Service).all()
+    
+    result = []
+    for service in services:
+        result.append({
+            "id": service.id,
+            "name": service.name,
+            "target_url": service.target_url,
+            "watermarking_enabled": getattr(service, 'watermarking_enabled', False)
+        })
+    
+    return {"services": result}
