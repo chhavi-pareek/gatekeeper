@@ -77,3 +77,11 @@ def init_db():
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE api_keys ADD COLUMN total_cost REAL DEFAULT 0.0"))
                 conn.commit()
+
+    # Check if watermarking_enabled column exists in services table, add it if missing
+    if 'services' in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns('services')]
+        if 'watermarking_enabled' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE services ADD COLUMN watermarking_enabled BOOLEAN DEFAULT 0"))
+                conn.commit()

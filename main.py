@@ -1274,24 +1274,173 @@ async def update_api_key_price(
     }
 
 
-@app.post("/billing/reset")
-async def reset_billing(db: Session = Depends(get_db)):
-    """
-    Reset total_cost to 0 for all API keys.
-    
-    This starts a new billing cycle by clearing accumulated costs.
-    Control-plane endpoint - no authentication required.
-    """
-    # Get all API keys
-    api_keys = db.query(ApiKey).all()
-    
-    # Reset total_cost for all API keys
-    for api_key in api_keys:
-        api_key.total_cost = 0.0
-    
-    db.commit()
-    
     return {
         "message": "Billing cycle reset successfully. All API key costs have been cleared.",
         "reset_count": len(api_keys)
     }
+
+
+# ============================================================================
+# Bot Detection & Security Endpoints
+# ============================================================================
+
+@app.get("/security/bot-activity")
+async def get_bot_activity(db: Session = Depends(get_db)):
+    """
+    Get recent bot activity logs.
+    """
+    # Get total requests count
+    total_requests = db.query(func.count(BotDetectionLog.id)).scalar() or 0
+    
+    # Get counts by classification
+    bot_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == "bot"
+    ).scalar() or 0
+    
+    suspicious_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == "suspicious"
+    ).scalar() or 0
+    
+    blocked_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.action_taken == "blocked"
+    ).scalar() or 0
+    
+    # Calculate bot percentage
+    bot_percentage = (bot_count / total_requests * 100) if total_requests > 0 else 0
+    
+    # Get recent logs (last 50)
+    recent_logs = db.query(BotDetectionLog).order_by(
+        BotDetectionLog.timestamp.desc()
+    ).limit(50).all()
+    
+    # Format logs
+    formatted_logs = []
+    for log in recent_logs:
+        service = db.query(Service).filter(Service.id == log.service_id).first()
+        service_name = service.name if service else "Unknown"
+        
+        formatted_logs.append({
+            "id": log.id,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+            "service_id": log.service_id,
+            "service_name": service_name,
+            "api_key": f"{log.api_key[:8]}..." if len(log.api_key) > 8 else log.api_key,
+            "bot_score": log.bot_score,
+            "classification": log.classification,
+            "user_agent": log.user_agent,
+            "action_taken": log.action_taken
+        })
+    
+    return {
+        "total_requests": total_requests,
+        "bot_percentage": round(bot_percentage, 1),
+        "blocked_count": blocked_count,
+        "suspicious_count": suspicious_count,
+        "recent_activity": formatted_logs
+    }
+
+
+@app.get("/security/bot-stats")
+async def get_bot_stats(db: Session = Depends(get_db)):
+    """
+    Get bot statistics breakdown.
+    """
+    # Classification breakdown
+    human_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == "human"
+    ).scalar() or 0
+    
+    suspicious_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == "suspicious"
+    ).scalar() or 0
+    
+    bot_count = db.query(func.count(BotDetectionLog.id)).filter(
+        BotDetectionLog.classification == "bot"
+    ).scalar() or 0
+    
+    # Top bot user agents
+    top_agents = db.query(
+        BotDetectionLog.user_agent,
+        func.count(BotDetectionLog.id).label('count')
+    ).filter(
+        BotDetectionLog.classification == "bot"
+    ).group_by(
+        BotDetectionLog.user_agent
+    ).order_by(
+        func.count(BotDetectionLog.id).desc()
+    ).limit(5).all()
+    
+    formatted_agents = [
+        {"user_agent": agent, "count": count}
+        for agent, count in top_agents
+    ]
+    
+    return {
+        "classification_breakdown": {
+            "human": human_count,
+            "suspicious": suspicious_count,
+            "bot": bot_count
+        },
+        "top_bot_user_agents": formatted_agents
+    }
+
+
+class UpdateBotBlockingRequest(BaseModel):
+    enabled: bool
+
+
+@app.put("/services/{service_id}/bot-blocking")
+async def update_bot_blocking(
+    service_id: int,
+    request: UpdateBotBlockingRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Update bot blocking configuration for a service.
+    """
+    # Verify service exists
+    service = db.query(Service).filter(Service.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    # Get or create config
+    config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).first()
+    
+    if not config:
+        config = ServiceConfig(
+            service_id=service_id,
+            block_bots_enabled=request.enabled
+        )
+        db.add(config)
+    else:
+        config.block_bots_enabled = request.enabled
+    
+    db.commit()
+    db.refresh(config)
+    
+    return {
+        "message": "Bot blocking configuration updated",
+        "service_id": service_id,
+        "block_bots_enabled": config.block_bots_enabled
+    }
+
+
+@app.get("/services/bot-blocking")
+async def get_all_bot_blocking_configs(db: Session = Depends(get_db)):
+    """
+    Get bot blocking configuration for all services.
+    """
+    services = db.query(Service).all()
+    
+    results = []
+    for service in services:
+        config = db.query(ServiceConfig).filter(ServiceConfig.service_id == service.id).first()
+        enabled = config.block_bots_enabled if config else False
+        
+        results.append({
+            "service_id": service.id,
+            "service_name": service.name,
+            "block_bots_enabled": enabled
+        })
+    
+    return {"services": results}
