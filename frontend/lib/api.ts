@@ -494,4 +494,55 @@ export const api = {
       method: "DELETE",
     });
   },
+
+  // ============================================================================
+  // Cryptographic Transparency (Merkle Trees)
+  // ============================================================================
+
+  /**
+   * Get the latest Merkle root
+   */
+  getMerkleLatest: async () => {
+    return apiRequest<{
+      batch_id: number;
+      merkle_root: string;
+      start_time: string;
+      end_time: string;
+      request_count: number;
+      created_at: string;
+    }>("/transparency/merkle-latest");
+  },
+
+  /**
+   * Get historical Merkle roots with pagination
+   */
+  getMerkleHistory: async (limit: number = 50, offset: number = 0) => {
+    return apiRequest<{
+      merkle_roots: Array<{
+        batch_id: number;
+        merkle_root: string;
+        start_time: string;
+        end_time: string;
+        request_count: number;
+        created_at: string;
+      }>;
+      total: number;
+      limit: number;
+      offset: number;
+    }>(`/transparency/merkle-history?limit=${limit}&offset=${offset}`);
+  },
+
+  /**
+   * Get hashes for a Merkle batch for client-side verification
+   */
+  verifyMerkleBatch: async (batchId: number) => {
+    return apiRequest<{
+      batch_id: number;
+      hashes: string[];
+      expected_root: string;
+      request_count: number;
+      start_time: string;
+      end_time: string;
+    }>(`/transparency/verify/${batchId}`);
+  },
 };

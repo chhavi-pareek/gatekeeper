@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional, Dict, List
 from app.database import init_db, get_db
-from app.models import User, Service, UsageLog, ApiKey, BotDetectionLog, ServiceConfig
+from app.models import User, Service, UsageLog, ApiKey, BotDetectionLog, ServiceConfig, RequestHash, MerkleRoot
 from app.bot_detector import calculate_bot_score, classify_traffic, should_block
 import httpx
 import secrets
@@ -22,6 +22,8 @@ import base64
 import json
 import re
 import uuid
+import hashlib
+import os
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -131,6 +133,133 @@ def inject_watermark_text(text: str, watermark: str, content_type: str) -> str:
         return f"{text}\n<!-- GAAS_WM:{watermark} -->"
     else:
         return f"{text}\n[GAAS_WM:{watermark}]"
+
+
+# ============================================================================
+# Merkle Tree / Cryptographic Transparency
+# ============================================================================
+
+# Merkle batch size: number of hashes to accumulate before computing a root
+MERKLE_BATCH_SIZE = int(os.getenv("MERKLE_BATCH_SIZE", "10"))
+
+
+def compute_request_hash(
+    service_id: int,
+    api_key_id: int,
+    timestamp: datetime,
+    request_path: str,
+    response_status: int
+) -> str:
+    """
+    Compute SHA-256 hash of API request for cryptographic transparency.
+    
+    Hash input format: service_id|api_key_id|timestamp_iso|request_path|response_status
+    
+    Args:
+        service_id: ID of the service
+        api_key_id: ID of the API key used
+        timestamp: Request timestamp
+        request_path: Request path (e.g., "/api/users")
+        response_status: HTTP response status code
+    
+    Returns:
+        64-character hexadecimal SHA-256 hash
+    """
+    # Format: service_id|api_key_id|timestamp_iso|request_path|response_status
+    data = f"{service_id}|{api_key_id}|{timestamp.isoformat()}|{request_path}|{response_status}"
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+def build_merkle_tree(hashes: List[str]) -> str:
+    """
+    Build Merkle tree from list of hashes and return root hash.
+    
+    Uses binary Merkle tree construction:
+    - Leaf nodes: Individual hashes
+    - Parent nodes: SHA-256(left_hash + right_hash)
+    - Odd number handling: Duplicate last hash
+    
+    Args:
+        hashes: List of SHA-256 hashes (hex strings)
+    
+    Returns:
+        Root hash of the Merkle tree (64-character hex string)
+        Empty string if input is empty
+    """
+    if len(hashes) == 0:
+        return ""
+    if len(hashes) == 1:
+        return hashes[0]
+    
+    # Build tree level by level
+    current_level = hashes[:]
+    while len(current_level) > 1:
+        next_level = []
+        for i in range(0, len(current_level), 2):
+            left = current_level[i]
+            # If odd number, duplicate last hash
+            right = current_level[i + 1] if i + 1 < len(current_level) else left
+            # Combine and hash
+            parent = hashlib.sha256((left + right).encode()).hexdigest()
+            next_level.append(parent)
+        current_level = next_level
+    
+    return current_level[0]
+
+
+def compute_and_store_merkle_root(db: Session) -> Optional[int]:
+    """
+    Compute Merkle root for unbatched request hashes and store it.
+    
+    Fetches the last MERKLE_BATCH_SIZE unbatched hashes, computes the Merkle root,
+    stores it in merkle_roots table, and updates the hashes with the batch ID.
+    
+    Args:
+        db: Database session
+    
+    Returns:
+        ID of the created MerkleRoot record, or None if no unbatched hashes
+    """
+    # Fetch unbatched hashes (oldest first)
+    unbatched_hashes = db.query(RequestHash).filter(
+        RequestHash.merkle_batch_id == None
+    ).order_by(RequestHash.timestamp.asc()).limit(MERKLE_BATCH_SIZE).all()
+    
+    if len(unbatched_hashes) < MERKLE_BATCH_SIZE:
+        # Not enough hashes to create a batch yet
+        return None
+    
+    # Extract hash values
+    hash_values = [h.hash for h in unbatched_hashes]
+    
+    # Compute Merkle root
+    merkle_root = build_merkle_tree(hash_values)
+    
+    # Get time range
+    start_time = unbatched_hashes[0].timestamp
+    end_time = unbatched_hashes[-1].timestamp
+    
+    # Create MerkleRoot record
+    merkle_root_record = MerkleRoot(
+        merkle_root=merkle_root,
+        start_time=start_time,
+        end_time=end_time,
+        request_count=len(unbatched_hashes)
+    )
+    db.add(merkle_root_record)
+    db.flush()  # Get the ID without committing
+    
+    # Update hashes with batch ID
+    for hash_record in unbatched_hashes:
+        hash_record.merkle_batch_id = merkle_root_record.id
+    
+    db.commit()
+    db.refresh(merkle_root_record)
+    
+    logger.info(f"Computed Merkle root: batch_id={merkle_root_record.id}, root={merkle_root[:16]}..., count={len(unbatched_hashes)}")
+    
+    return merkle_root_record.id
+
 
 app = FastAPI(
     title="GaaS Gateway",
@@ -511,11 +640,55 @@ async def proxy_request(
                 if key.lower() not in {'content-length', 'connection', 'transfer-encoding', 'content-encoding'}
             }
             
-            # Get API key object for watermarking
+            # Get API key object for watermarking and hashing
             api_key_obj = db.query(ApiKey).filter(
                 ApiKey.key == api_key,
                 ApiKey.is_active == True
             ).first()
+            
+            # Store request hash for cryptographic transparency
+            if api_key_obj:
+                try:
+                    # Extract request path from the original request
+                    request_path = str(request.url.path)
+                    
+                    # Compute hash
+                    request_timestamp = datetime.now(timezone.utc)
+                    request_hash = compute_request_hash(
+                        service_id=service.id,
+                        api_key_id=api_key_obj.id,
+                        timestamp=request_timestamp,
+                        request_path=request_path,
+                        response_status=response.status_code
+                    )
+                    
+                    # Store hash
+                    hash_record = RequestHash(
+                        service_id=service.id,
+                        api_key_id=api_key_obj.id,
+                        timestamp=request_timestamp,
+                        request_path=request_path,
+                        response_status=response.status_code,
+                        hash=request_hash,
+                        merkle_batch_id=None  # Will be set when batched
+                    )
+                    db.add(hash_record)
+                    db.commit()
+                    
+                    logger.debug(f"Stored request hash: service_id={service.id}, hash={request_hash[:16]}...")
+                    
+                    # Try to compute Merkle root if we have enough unbatched hashes
+                    try:
+                        compute_and_store_merkle_root(db)
+                    except Exception as e:
+                        logger.warning(f"Failed to compute Merkle root: {e}")
+                        # Don't fail the request if Merkle computation fails
+                        pass
+                except Exception as e:
+                    logger.warning(f"Failed to store request hash: {e}")
+                    # Don't fail the request if hash storage fails
+                    db.rollback()
+                    pass
             
             # Log successful requests (HTTP 2xx) to UsageLog and update billing
             if 200 <= response.status_code < 300:
@@ -1659,4 +1832,130 @@ async def delete_service(service_id: int, db: Session = Depends(get_db)):
         "message": f"Service '{service_name}' and all related data deleted successfully",
         "service_id": service_id,
         "service_name": service_name
+    }
+
+
+# ============================================================================
+# Cryptographic Transparency Endpoints (Merkle Trees)
+# ============================================================================
+
+@app.get("/transparency/merkle-latest")
+async def get_latest_merkle_root(db: Session = Depends(get_db)):
+    """
+    Get the latest computed Merkle root.
+    
+    Returns the most recent Merkle root with metadata including time range
+    and request count.
+    
+    Returns:
+        Latest Merkle root data or 404 if no roots computed yet
+    """
+    # Get the latest Merkle root (highest ID)
+    latest_root = db.query(MerkleRoot).order_by(MerkleRoot.id.desc()).first()
+    
+    if not latest_root:
+        raise HTTPException(
+            status_code=404,
+            detail="No Merkle roots computed yet. Make requests through the gateway to generate roots."
+        )
+    
+    return {
+        "batch_id": latest_root.id,
+        "merkle_root": latest_root.merkle_root,
+        "start_time": latest_root.start_time.isoformat(),
+        "end_time": latest_root.end_time.isoformat(),
+        "request_count": latest_root.request_count,
+        "created_at": latest_root.created_at.isoformat()
+    }
+
+
+@app.get("/transparency/merkle-history")
+async def get_merkle_history(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """
+    Get historical Merkle roots with pagination.
+    
+    Args:
+        limit: Maximum number of roots to return (default: 50, max: 100)
+        offset: Number of roots to skip (default: 0)
+    
+    Returns:
+        List of Merkle roots with pagination metadata
+    """
+    # Validate and cap limit
+    if limit < 1:
+        limit = 50
+    if limit > 100:
+        limit = 100
+    
+    if offset < 0:
+        offset = 0
+    
+    # Get total count
+    total = db.query(func.count(MerkleRoot.id)).scalar() or 0
+    
+    # Get paginated roots (newest first)
+    roots = db.query(MerkleRoot).order_by(
+        MerkleRoot.id.desc()
+    ).limit(limit).offset(offset).all()
+    
+    return {
+        "merkle_roots": [
+            {
+                "batch_id": root.id,
+                "merkle_root": root.merkle_root,
+                "start_time": root.start_time.isoformat(),
+                "end_time": root.end_time.isoformat(),
+                "request_count": root.request_count,
+                "created_at": root.created_at.isoformat()
+            }
+            for root in roots
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.get("/transparency/verify/{batch_id}")
+async def verify_merkle_batch(
+    batch_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all hashes in a Merkle batch for client-side verification.
+    
+    Returns the list of hashes that were used to compute the Merkle root,
+    allowing clients to independently verify the computation.
+    
+    Args:
+        batch_id: ID of the Merkle batch to verify
+    
+    Returns:
+        Batch hashes and expected root for verification
+    """
+    # Get the Merkle root record
+    merkle_root = db.query(MerkleRoot).filter(MerkleRoot.id == batch_id).first()
+    
+    if not merkle_root:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Merkle batch {batch_id} not found"
+        )
+    
+    # Get all hashes in this batch (ordered by timestamp)
+    hashes = db.query(RequestHash).filter(
+        RequestHash.merkle_batch_id == batch_id
+    ).order_by(RequestHash.timestamp.asc()).all()
+    
+    return {
+        "batch_id": batch_id,
+        "hashes": [h.hash for h in hashes],
+        "expected_root": merkle_root.merkle_root,
+        "request_count": len(hashes),
+        "start_time": merkle_root.start_time.isoformat(),
+        "end_time": merkle_root.end_time.isoformat()
     }

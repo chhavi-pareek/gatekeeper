@@ -291,3 +291,6 @@ dist/
 # Temporary files
 *.tmp
 *.temp
+
+# Virtual environment
+.venv

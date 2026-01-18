@@ -40,7 +40,7 @@ def init_db():
     """
     # Import all models to ensure they're registered with Base.metadata
     # Import at function level to avoid circular imports
-    from app.models import Gateway, Route, User, Service, UsageLog, ApiKey
+    from app.models import Gateway, Route, User, Service, UsageLog, ApiKey, RequestHash, MerkleRoot
     from sqlalchemy import inspect, text
     
     Base.metadata.create_all(bind=engine)

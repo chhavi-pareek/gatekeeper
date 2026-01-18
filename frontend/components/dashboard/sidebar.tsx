@@ -52,6 +52,11 @@ const navigation = [
     icon: Fingerprint,
   },
   {
+    name: "Transparency",
+    href: "/transparency",
+    icon: Shield,
+  },
+  {
     name: "Settings",
     href: "/settings",
     icon: Settings,
