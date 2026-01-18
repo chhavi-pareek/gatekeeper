@@ -101,13 +101,24 @@ def extract_watermark_from_text(text: str) -> Optional[str]:
     return None
 
 
-def inject_watermark_json(data: dict, watermark: str) -> dict:
+def inject_watermark_json(data, watermark: str):
     """
     Inject watermark into JSON data by adding _gaas_watermark field.
+    If data is a dict, adds the field directly.
+    If data is a list/array, wraps it in a dict with data and watermark.
     """
     if isinstance(data, dict):
         data["_gaas_watermark"] = watermark
-    return data
+        return data
+    elif isinstance(data, list):
+        # For arrays, wrap in an object with the data and watermark
+        return {
+            "data": data,
+            "_gaas_watermark": watermark
+        }
+    else:
+        # For other types (shouldn't happen with valid JSON), return as-is
+        return data
 
 
 def inject_watermark_text(text: str, watermark: str, content_type: str) -> str:
@@ -1422,6 +1433,166 @@ async def update_bot_blocking(
         "message": "Bot blocking configuration updated",
         "service_id": service_id,
         "block_bots_enabled": config.block_bots_enabled
+    }
+
+
+@app.get("/services/list")
+async def list_services(db: Session = Depends(get_db)):
+    """
+    Get list of all services with watermarking status.
+    
+    Returns:
+    - services: List of all services with id, name, target_url, and watermarking_enabled status
+    """
+    services = db.query(Service).all()
+    
+    results = []
+    for service in services:
+        results.append({
+            "id": service.id,
+            "name": service.name,
+            "target_url": service.target_url,
+            "watermarking_enabled": service.watermarking_enabled
+        })
+    
+    return {"services": results}
+
+
+@app.get("/services/{service_id}/watermarking")
+async def get_watermarking_status(service_id: int, db: Session = Depends(get_db)):
+    """
+    Get watermarking status for a specific service.
+    
+    Returns:
+    - service_id: Service ID
+    - service_name: Service name
+    - watermarking_enabled: Whether watermarking is enabled
+    """
+    service = db.query(Service).filter(Service.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    return {
+        "service_id": service.id,
+        "service_name": service.name,
+        "watermarking_enabled": service.watermarking_enabled
+    }
+
+
+class ToggleWatermarkingRequest(BaseModel):
+    """Request model for toggling watermarking."""
+    enabled: bool
+
+
+@app.post("/services/{service_id}/watermarking")
+async def toggle_watermarking(
+    service_id: int,
+    request: ToggleWatermarkingRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Toggle watermarking for a service.
+    
+    Args:
+    - service_id: Service ID
+    - enabled: Whether to enable or disable watermarking
+    
+    Returns:
+    - message: Success message
+    - service_id: Service ID
+    - service_name: Service name
+    - watermarking_enabled: New watermarking status
+    """
+    service = db.query(Service).filter(Service.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    service.watermarking_enabled = request.enabled
+    db.commit()
+    db.refresh(service)
+    
+    return {
+        "message": f"Watermarking {'enabled' if request.enabled else 'disabled'} for service '{service.name}'",
+        "service_id": service.id,
+        "service_name": service.name,
+        "watermarking_enabled": service.watermarking_enabled
+    }
+
+
+class VerifyWatermarkRequest(BaseModel):
+    """Request model for verifying watermark."""
+    data: str
+
+
+@app.post("/watermark/verify")
+async def verify_watermark(request: VerifyWatermarkRequest, db: Session = Depends(get_db)):
+    """
+    Verify and extract watermark from leaked data.
+    
+    Args:
+    - data: The data to check for watermark (JSON string or text)
+    
+    Returns:
+    - watermark_found: Whether a watermark was found
+    - raw_watermark: The raw base64-encoded watermark
+    - decoded: Decoded watermark information
+    - attribution: Human-readable attribution string
+    """
+    watermark = None
+    
+    # Try to parse as JSON first
+    try:
+        json_data = json.loads(request.data)
+        watermark = extract_watermark_from_json(json_data)
+    except json.JSONDecodeError:
+        # Not JSON, try extracting from text
+        watermark = extract_watermark_from_text(request.data)
+    
+    if not watermark:
+        return {
+            "watermark_found": False,
+            "raw_watermark": "",
+            "decoded": {},
+            "attribution": "No watermark found in the provided data"
+        }
+    
+    # Decode the watermark
+    decoded_data = decode_watermark(watermark)
+    
+    if not decoded_data:
+        return {
+            "watermark_found": True,
+            "raw_watermark": watermark,
+            "decoded": {},
+            "attribution": "Watermark found but could not be decoded (invalid format)"
+        }
+    
+    # Get service and API key information
+    service = db.query(Service).filter(Service.id == decoded_data["service_id"]).first()
+    api_key_obj = db.query(ApiKey).filter(ApiKey.id == decoded_data["api_key_id"]).first()
+    
+    service_name = service.name if service else f"Unknown Service (ID: {decoded_data['service_id']})"
+    api_key_masked = api_key_obj.key[:8] + "..." if api_key_obj else "Unknown"
+    
+    attribution = (
+        f"Data leaked from service '{service_name}' "
+        f"via API key {api_key_masked} "
+        f"at {decoded_data['timestamp']} "
+        f"(Request ID: {decoded_data['request_id']})"
+    )
+    
+    return {
+        "watermark_found": True,
+        "raw_watermark": watermark,
+        "decoded": {
+            "service_id": decoded_data["service_id"],
+            "service_name": service_name,
+            "api_key_id": decoded_data["api_key_id"],
+            "api_key_masked": api_key_masked,
+            "request_id": decoded_data["request_id"],
+            "timestamp": decoded_data["timestamp"]
+        },
+        "attribution": attribution
     }
 
 
