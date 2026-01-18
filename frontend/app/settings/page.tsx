@@ -34,7 +34,8 @@ import {
   Ban,
   Loader2,
   Plus,
-  X
+  X,
+  Trash2
 } from "lucide-react";
 
 interface ApiKeyData {
@@ -58,16 +59,16 @@ export default function SettingsPage() {
   const [copied, setCopied] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
   const [servicesApiKeys, setServicesApiKeys] = useState<ServiceApiKeys[]>([]);
   const [isLoadingApiKeys, setIsLoadingApiKeys] = useState(true);
   const [copiedKeyId, setCopiedKeyId] = useState<number | null>(null);
   const [revokingKeyId, setRevokingKeyId] = useState<number | null>(null);
-  
+
   // Rate limit editing state: key_id -> { requests, window_seconds }
   const [rateLimitEdits, setRateLimitEdits] = useState<Record<number, { requests: string; windowSeconds: string }>>({});
   const [savingKeyId, setSavingKeyId] = useState<number | null>(null);
-  
+
   // Modal state for new API key
   const [newApiKeyModal, setNewApiKeyModal] = useState<{
     isOpen: boolean;
@@ -77,6 +78,7 @@ export default function SettingsPage() {
   } | null>(null);
   const [isGeneratingKey, setIsGeneratingKey] = useState(false);
   const [newKeyCopied, setNewKeyCopied] = useState(false);
+  const [deletingServiceId, setDeletingServiceId] = useState<number | null>(null);
 
   // Load API key from localStorage on mount
   useEffect(() => {
@@ -110,7 +112,7 @@ export default function SettingsPage() {
 
     try {
       const data = await api.getMyApiKey();
-      
+
       if (data.api_key) {
         setApiKey(data.api_key);
         setIsRevealed(true);
@@ -245,10 +247,10 @@ export default function SettingsPage() {
           api_keys: service.api_keys.map((key) =>
             key.id === keyId
               ? {
-                  ...key,
-                  rate_limit_requests: requests,
-                  rate_limit_window_seconds: windowSeconds,
-                }
+                ...key,
+                rate_limit_requests: requests,
+                rate_limit_window_seconds: windowSeconds,
+              }
               : key
           ),
         }))
@@ -272,7 +274,7 @@ export default function SettingsPage() {
     setIsGeneratingKey(true);
     try {
       const data = await api.createServiceApiKey(serviceId);
-      
+
       // Show modal with new key
       setNewApiKeyModal({
         isOpen: true,
@@ -280,7 +282,7 @@ export default function SettingsPage() {
         serviceId: serviceId,
         serviceName: serviceName,
       });
-      
+
       // Refresh the API keys list to show the new key
       await fetchApiKeys();
     } catch (err) {
@@ -303,6 +305,25 @@ export default function SettingsPage() {
   const closeNewKeyModal = () => {
     setNewApiKeyModal(null);
     setNewKeyCopied(false);
+  };
+
+  const handleDeleteService = async (serviceId: number, serviceName: string) => {
+    if (!confirm(`Are you sure you want to delete the service "${serviceName}"? This will permanently delete all API keys, usage logs, and configurations for this service. This action cannot be undone.`)) {
+      return;
+    }
+
+    setDeletingServiceId(serviceId);
+    try {
+      const result = await api.deleteService(serviceId);
+      toast.success(result.message || `Service "${serviceName}" deleted successfully`);
+      // Refresh the API keys list to remove the deleted service
+      await fetchApiKeys();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to delete service";
+      toast.error(errorMessage);
+    } finally {
+      setDeletingServiceId(null);
+    }
   };
 
   const maskedKey = "••••••••••••••••••••••••••••••••••••••••";
@@ -345,7 +366,7 @@ export default function SettingsPage() {
             <Alert className="border-amber-500/50 bg-amber-500/5">
               <AlertTriangle className="h-4 w-4 text-amber-500" />
               <AlertDescription className="text-sm text-amber-600 dark:text-amber-400">
-                <strong>Important:</strong> Keep your API key secure and never share it publicly. 
+                <strong>Important:</strong> Keep your API key secure and never share it publicly.
                 Exposed keys can be used to access your gateway services.
               </AlertDescription>
             </Alert>
@@ -399,7 +420,7 @@ export default function SettingsPage() {
               <p className="text-xs text-muted-foreground">
                 {isRevealed && apiKey
                   ? "Your API key is visible. Keep it secure and never share it."
-                  : apiKey 
+                  : apiKey
                     ? "Click the eye icon to reveal your API key"
                     : "Click the eye icon to fetch your API key from the server"}
               </p>
@@ -466,27 +487,48 @@ export default function SettingsPage() {
                           {service.api_keys.length} key{service.api_keys.length !== 1 ? 's' : ''}
                         </Badge>
                       </div>
-                      <Button
-                        variant="default"
-                        size="sm"
-                        onClick={() => handleGenerateNewKey(service.service_id, service.service_name)}
-                        disabled={isGeneratingKey}
-                        className="gap-2"
-                      >
-                        {isGeneratingKey ? (
-                          <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Generating...
-                          </>
-                        ) : (
-                          <>
-                            <Plus className="h-4 w-4" />
-                            Generate New API Key
-                          </>
-                        )}
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="default"
+                          size="sm"
+                          onClick={() => handleGenerateNewKey(service.service_id, service.service_name)}
+                          disabled={isGeneratingKey}
+                          className="gap-2"
+                        >
+                          {isGeneratingKey ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Generating...
+                            </>
+                          ) : (
+                            <>
+                              <Plus className="h-4 w-4" />
+                              Generate New API Key
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleDeleteService(service.service_id, service.service_name)}
+                          disabled={deletingServiceId === service.service_id}
+                          className="gap-2 text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30"
+                        >
+                          {deletingServiceId === service.service_id ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Deleting...
+                            </>
+                          ) : (
+                            <>
+                              <Trash2 className="h-4 w-4" />
+                              Delete Service
+                            </>
+                          )}
+                        </Button>
+                      </div>
                     </div>
-                    
+
                     {service.api_keys.length === 0 ? (
                       <p className="text-sm text-muted-foreground py-4">
                         No API keys for this service yet
@@ -634,7 +676,7 @@ export default function SettingsPage() {
                   Maximum number of requests allowed per rate limit window
                 </p>
               </div>
-              
+
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium">Time Window</span>
@@ -686,7 +728,7 @@ export default function SettingsPage() {
                   <div>
                     <p className="text-sm font-medium mb-1">Store Securely</p>
                     <p className="text-xs text-muted-foreground">
-                      Store API keys in environment variables or secure secret management systems. 
+                      Store API keys in environment variables or secure secret management systems.
                       Never commit keys to version control.
                     </p>
                   </div>
@@ -699,7 +741,7 @@ export default function SettingsPage() {
                   <div>
                     <p className="text-sm font-medium mb-1">Rotate Regularly</p>
                     <p className="text-xs text-muted-foreground">
-                      Rotate your API keys periodically to minimize the impact of potential leaks. 
+                      Rotate your API keys periodically to minimize the impact of potential leaks.
                       Generate new keys when team members leave.
                     </p>
                   </div>
@@ -714,7 +756,7 @@ export default function SettingsPage() {
                   <div>
                     <p className="text-sm font-medium mb-1">Monitor Usage</p>
                     <p className="text-xs text-muted-foreground">
-                      Regularly monitor API usage patterns. Unusual spikes may indicate 
+                      Regularly monitor API usage patterns. Unusual spikes may indicate
                       key compromise or abuse.
                     </p>
                   </div>
@@ -727,7 +769,7 @@ export default function SettingsPage() {
                   <div>
                     <p className="text-sm font-medium mb-1">Use HTTPS</p>
                     <p className="text-xs text-muted-foreground">
-                      Always use HTTPS when making requests to the gateway. 
+                      Always use HTTPS when making requests to the gateway.
                       Never transmit API keys over unencrypted connections.
                     </p>
                   </div>
@@ -769,7 +811,7 @@ export default function SettingsPage() {
                 <Alert className="border-amber-500/50 bg-amber-500/5">
                   <AlertTriangle className="h-4 w-4 text-amber-500" />
                   <AlertDescription className="text-sm text-amber-600 dark:text-amber-400">
-                    <strong>Important:</strong> This API key will only be shown once. 
+                    <strong>Important:</strong> This API key will only be shown once.
                     Make sure to copy and store it securely. You won't be able to view it again.
                   </AlertDescription>
                 </Alert>

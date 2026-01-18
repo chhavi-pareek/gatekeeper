@@ -1444,3 +1444,48 @@ async def get_all_bot_blocking_configs(db: Session = Depends(get_db)):
         })
     
     return {"services": results}
+
+
+@app.delete("/services/{service_id}")
+async def delete_service(service_id: int, db: Session = Depends(get_db)):
+    """
+    Delete a service and all its related data.
+    
+    Cascade deletes:
+    - All API keys for this service
+    - All usage logs for this service
+    - All bot detection logs for this service
+    - Service configuration
+    
+    Control-plane endpoint - no authentication required.
+    """
+    # Check if service exists
+    service = db.query(Service).filter(Service.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    service_name = service.name
+    
+    # Delete related data (cascade deletion)
+    # 1. Delete all API keys for this service
+    db.query(ApiKey).filter(ApiKey.service_id == service_id).delete()
+    
+    # 2. Delete all usage logs for this service
+    db.query(UsageLog).filter(UsageLog.service_id == service_id).delete()
+    
+    # 3. Delete all bot detection logs for this service
+    db.query(BotDetectionLog).filter(BotDetectionLog.service_id == service_id).delete()
+    
+    # 4. Delete service configuration
+    db.query(ServiceConfig).filter(ServiceConfig.service_id == service_id).delete()
+    
+    # 5. Finally, delete the service itself
+    db.delete(service)
+    
+    db.commit()
+    
+    return {
+        "message": f"Service '{service_name}' and all related data deleted successfully",
+        "service_id": service_id,
+        "service_name": service_name
+    }

@@ -481,4 +481,17 @@ export const api = {
       body: JSON.stringify({ data }),
     });
   },
+
+  /**
+   * Delete a service and all its related data
+   */
+  deleteService: async (serviceId: number) => {
+    return apiRequest<{
+      message: string;
+      service_id: number;
+      service_name: string;
+    }>(`/services/${serviceId}`, {
+      method: "DELETE",
+    });
+  },
 };
