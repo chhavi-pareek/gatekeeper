@@ -59,6 +59,10 @@ export default function TransparencyPage() {
     const [verificationResult, setVerificationResult] = useState<{
         batchId: number;
         verified: boolean;
+        isBlockchain?: boolean;
+        txHash?: string;
+        blockNumber?: number;
+        etherscanUrl?: string;
     } | null>(null);
 
     // Pagination
@@ -110,15 +114,44 @@ export default function TransparencyPage() {
         setVerificationResult(null);
 
         try {
-            const data = await api.verifyMerkleBatch(batchId);
-            const verified = await verifyMerkleRoot(data.hashes, data.expected_root);
+            // First, check if this batch is anchored to blockchain
+            const blockchainProof = await api.getBlockchainProof(batchId);
 
-            setVerificationResult({ batchId, verified });
+            if (blockchainProof.is_anchored) {
+                // Blockchain verification - fetch on-chain data
+                const batchData = await api.verifyMerkleBatch(batchId);
+                const verified = await verifyMerkleRoot(batchData.hashes, batchData.expected_root);
 
-            if (verified) {
-                toast.success(`Batch ${batchId} verified successfully! ✓`);
+                setVerificationResult({
+                    batchId,
+                    verified,
+                    isBlockchain: true,
+                    txHash: blockchainProof.tx_hash,
+                    blockNumber: blockchainProof.block_number,
+                    etherscanUrl: blockchainProof.etherscan_url
+                });
+
+                if (verified) {
+                    toast.success(`Batch ${batchId} verified on blockchain! ✓`);
+                } else {
+                    toast.error(`Batch ${batchId} blockchain verification failed! ✗`);
+                }
             } else {
-                toast.error(`Batch ${batchId} verification failed! ✗`);
+                // Local verification - not yet anchored
+                const data = await api.verifyMerkleBatch(batchId);
+                const verified = await verifyMerkleRoot(data.hashes, data.expected_root);
+
+                setVerificationResult({
+                    batchId,
+                    verified,
+                    isBlockchain: false
+                });
+
+                if (verified) {
+                    toast.success(`Batch ${batchId} verified locally! ✓ (Not yet on blockchain)`);
+                } else {
+                    toast.error(`Batch ${batchId} verification failed! ✗`);
+                }
             }
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : "Verification failed";
@@ -298,9 +331,29 @@ export default function TransparencyPage() {
                                             <AlertCircle className="h-4 w-4 text-red-500" />
                                         )}
                                         <AlertDescription className={verificationResult.verified ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}>
-                                            {verificationResult.verified
-                                                ? "✓ Integrity verified! The Merkle root matches the computed hash."
-                                                : "✗ Integrity check failed! The Merkle root does not match."}
+                                            <div className="space-y-2">
+                                                <p className="font-medium">
+                                                    {verificationResult.verified
+                                                        ? verificationResult.isBlockchain
+                                                            ? "✓ Verified on Sepolia Blockchain!"
+                                                            : "✓ Verified Locally (Not yet on blockchain)"
+                                                        : "✗ Integrity check failed!"}
+                                                </p>
+                                                {verificationResult.verified && verificationResult.isBlockchain && (
+                                                    <div className="text-xs space-y-1 pt-1">
+                                                        <p>Block: #{verificationResult.blockNumber}</p>
+                                                        <p className="font-mono break-all">Tx: {verificationResult.txHash}</p>
+                                                        <a
+                                                            href={verificationResult.etherscanUrl}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-green-600 dark:text-green-400 hover:underline inline-flex items-center gap-1"
+                                                        >
+                                                            View on Etherscan →
+                                                        </a>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </AlertDescription>
                                     </Alert>
                                 )}

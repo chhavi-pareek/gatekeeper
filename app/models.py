@@ -153,3 +153,10 @@ class MerkleRoot(Base):
     end_time = Column(DateTime(timezone=True), nullable=False)
     request_count = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    
+    # Blockchain anchoring fields
+    is_anchored = Column(Boolean, default=False, nullable=False)
+    tx_hash = Column(String(66), nullable=True)  # 0x + 64 hex chars
+    block_number = Column(Integer, nullable=True)
+    anchored_at = Column(DateTime(timezone=True), nullable=True)
+

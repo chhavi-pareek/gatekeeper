@@ -545,4 +545,19 @@ export const api = {
       end_time: string;
     }>(`/transparency/verify/${batchId}`);
   },
+
+  /**
+   * Get blockchain anchoring proof for a Merkle batch
+   */
+  getBlockchainProof: async (batchId: number) => {
+    return apiRequest<{
+      batch_id: number;
+      is_anchored: boolean;
+      tx_hash?: string;
+      block_number?: number;
+      anchored_at?: string;
+      etherscan_url?: string;
+      message?: string;
+    }>(`/transparency/blockchain/${batchId}`);
+  },
 };

@@ -1,0 +1,20 @@
+# Environment variables (DO NOT COMMIT)
+.env
+
+# Hardhat files
+cache/
+artifacts/
+typechain-types/
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

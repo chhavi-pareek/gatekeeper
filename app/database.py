@@ -85,3 +85,22 @@ def init_db():
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE services ADD COLUMN watermarking_enabled BOOLEAN DEFAULT 0"))
                 conn.commit()
+    # Check if blockchain anchoring columns exist in merkle_roots table, add them if missing
+    if 'merkle_roots' in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns('merkle_roots')]
+        if 'is_anchored' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE merkle_roots ADD COLUMN is_anchored BOOLEAN DEFAULT 0"))
+                conn.commit()
+        if 'tx_hash' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE merkle_roots ADD COLUMN tx_hash TEXT"))
+                conn.commit()
+        if 'block_number' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE merkle_roots ADD COLUMN block_number INTEGER"))
+                conn.commit()
+        if 'anchored_at' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE merkle_roots ADD COLUMN anchored_at TIMESTAMP"))
+                conn.commit()

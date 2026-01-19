@@ -1,6 +1,11 @@
 """
 Main entry point for the gaas-gateway FastAPI application.
 """
+
+# Load environment variables FIRST
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -257,6 +262,30 @@ def compute_and_store_merkle_root(db: Session) -> Optional[int]:
     db.refresh(merkle_root_record)
     
     logger.info(f"Computed Merkle root: batch_id={merkle_root_record.id}, root={merkle_root[:16]}..., count={len(unbatched_hashes)}")
+    
+    # Anchor to blockchain (async, non-blocking)
+    try:
+        from app.blockchain import blockchain_anchor
+        
+        result = blockchain_anchor.anchor_merkle_root(
+            merkle_root=merkle_root,
+            batch_id=merkle_root_record.id,
+            request_count=len(unbatched_hashes)
+        )
+        
+        if result:
+            merkle_root_record.is_anchored = True
+            merkle_root_record.tx_hash = result["tx_hash"]
+            merkle_root_record.block_number = result["block_number"]
+            merkle_root_record.anchored_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(f"✅ Blockchain anchoring successful: tx={result['tx_hash']}")
+        else:
+            logger.info("Blockchain anchoring skipped or failed (non-blocking)")
+    except Exception as e:
+        logger.error(f"❌ Blockchain anchoring failed: {e}")
+        # Don't fail Merkle computation if anchoring fails
+        pass
     
     return merkle_root_record.id
 
@@ -1958,4 +1987,46 @@ async def verify_merkle_batch(
         "request_count": len(hashes),
         "start_time": merkle_root.start_time.isoformat(),
         "end_time": merkle_root.end_time.isoformat()
+    }
+
+
+@app.get("/transparency/blockchain/{batch_id}")
+async def get_blockchain_proof(
+    batch_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get blockchain anchoring proof for a Merkle batch.
+    
+    Returns transaction hash, block number, and Etherscan link if the batch
+    has been anchored to the Sepolia blockchain.
+    
+    Args:
+        batch_id: ID of the Merkle batch
+    
+    Returns:
+        Blockchain anchoring information or status
+    """
+    merkle_root = db.query(MerkleRoot).filter(MerkleRoot.id == batch_id).first()
+    
+    if not merkle_root:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Batch {batch_id} not found"
+        )
+    
+    if not merkle_root.is_anchored:
+        return {
+            "batch_id": batch_id,
+            "is_anchored": False,
+            "message": "This batch has not been anchored to blockchain yet"
+        }
+    
+    return {
+        "batch_id": batch_id,
+        "is_anchored": True,
+        "tx_hash": merkle_root.tx_hash,
+        "block_number": merkle_root.block_number,
+        "anchored_at": merkle_root.anchored_at.isoformat() if merkle_root.anchored_at else None,
+        "etherscan_url": f"https://sepolia.etherscan.io/tx/{merkle_root.tx_hash}"
     }
