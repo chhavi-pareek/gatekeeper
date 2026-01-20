@@ -538,6 +538,50 @@ async def check_rate_limit(api_key: str, db: Session) -> bool:
             return False
 
 
+def validate_api_key_for_service(api_key: str, service_id: int, db: Session) -> bool:
+    """
+    Validate that an API key is authorized to access a specific service.
+    
+    Checks:
+    1. API key exists and is active in the ApiKey table
+    2. API key belongs to the specified service (service_id matches)
+    3. Service belongs to the same owner as the API key's service (for additional security)
+    
+    Args:
+        api_key: The API key string to validate
+        service_id: The service ID being accessed
+        db: Database session
+    
+    Returns:
+        True if authorized, False otherwise
+    """
+    # Check if API key exists and is active
+    api_key_obj = db.query(ApiKey).filter(
+        ApiKey.key == api_key,
+        ApiKey.is_active == True
+    ).first()
+    
+    if not api_key_obj:
+        # Try fallback to User.api_key for backward compatibility
+        user = db.query(User).filter(User.api_key == api_key).first()
+        if user:
+            # For user-level API keys, check if the service belongs to this user
+            service = db.query(Service).filter(Service.id == service_id).first()
+            if service and service.owner_id == user.id:
+                return True
+        return False
+    
+    # Check if the API key belongs to the requested service
+    if api_key_obj.service_id != service_id:
+        logger.warning(
+            f"Authorization failed: API key (service_id={api_key_obj.service_id}) "
+            f"attempted to access service_id={service_id}"
+        )
+        return False
+    
+    return True
+
+
 @app.post("/register-api", response_model=RegisterApiResponse)
 async def register_api(
     request: RegisterApiRequest,
@@ -825,6 +869,13 @@ async def proxy_get(
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
+    # Validate API key is authorized for this service
+    if not validate_api_key_for_service(api_key_from_header, service_id, db):
+        raise HTTPException(
+            status_code=403,
+            detail="API key not authorized for this service"
+        )
+    
     # Bot detection
     bot_score = calculate_bot_score(request, api_key_from_header, db)
     classification = classify_traffic(bot_score)
@@ -890,6 +941,13 @@ async def proxy_post(
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
+    # Validate API key is authorized for this service
+    if not validate_api_key_for_service(api_key_from_header, service_id, db):
+        raise HTTPException(
+            status_code=403,
+            detail="API key not authorized for this service"
+        )
+    
     # Bot detection
     bot_score = calculate_bot_score(request, api_key_from_header, db)
     classification = classify_traffic(bot_score)
@@ -935,6 +993,13 @@ async def proxy_put(
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
     
+    # Validate API key is authorized for this service
+    if not validate_api_key_for_service(api_key_from_header, service_id, db):
+        raise HTTPException(
+            status_code=403,
+            detail="API key not authorized for this service"
+        )
+    
     # Bot detection
     bot_score = calculate_bot_score(request, api_key_from_header, db)
     classification = classify_traffic(bot_score)
@@ -979,6 +1044,13 @@ async def proxy_delete(
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
+    
+    # Validate API key is authorized for this service
+    if not validate_api_key_for_service(api_key_from_header, service_id, db):
+        raise HTTPException(
+            status_code=403,
+            detail="API key not authorized for this service"
+        )
     
     # Bot detection
     bot_score = calculate_bot_score(request, api_key_from_header, db)
